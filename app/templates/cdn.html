@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="chart-head">
+  <h1>CDN Analytics</h1>
+  <div class="range-buttons">
+    {% for r,label in [('1h','1 Jam'),('1d','1 Hari'),('7d','7 Hari'),('30d','30 Hari')] %}
+    <a class="range-btn {{ 'active' if range==r else '' }}" href="/cdn?range={{ r }}">{{ label }}</a>
+    {% endfor %}
+  </div>
+</div>
+<p class="muted">Parsed query.log incremental. Retention {{ data.retention_days }} hari. Status: {{ data.parse.status }}, parsed {{ data.parse.parsed }}, matched {{ data.parse.matched }}.</p>
+
+<div class="grid2">
+  <div class="card">
+    <h2>Top Apps</h2>
+    <table class="data-table">
+      <thead><tr><th>App/CDN</th><th>Queries</th><th>Last Seen</th></tr></thead>
+      <tbody>
+      {% for row in data.apps %}
+        <tr><td>{{ row.app }}</td><td>{{ row.queries }}</td><td>{{ row.last_seen_local }}</td></tr>
+      {% else %}
+        <tr><td colspan="3" class="muted">No data yet. Wait 1-2 minutes while query log fills.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Top Domains</h2>
+    <table class="data-table">
+      <thead><tr><th>App</th><th>Domain</th><th>Type</th><th>Queries</th><th>Last Seen</th></tr></thead>
+      <tbody>
+      {% for row in data.domains %}
+        <tr><td>{{ row.app }}</td><td class="mono">{{ row.domain }}</td><td>{{ row.qtype }}</td><td>{{ row.queries }}</td><td>{{ row.last_seen_local }}</td></tr>
+      {% else %}
+        <tr><td colspan="5" class="muted">No data yet.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

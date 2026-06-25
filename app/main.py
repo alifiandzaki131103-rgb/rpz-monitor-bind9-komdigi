@@ -23,6 +23,8 @@ RPZ_LOG = os.getenv("RPZ_LOG", "/var/cache/bind/rpz.log")
 ZONE_FILE = os.getenv("ZONE_FILE", "/var/cache/bind/db.trustpositifkominfo")
 APP_TZ = os.getenv("APP_TZ", "Asia/Jakarta")
 TZ = ZoneInfo(APP_TZ)
+CDN_RETENTION_DAYS = int(os.getenv("CDN_RETENTION_DAYS", "30"))
+CDN_PARSE_MAX_BYTES = int(os.getenv("CDN_PARSE_MAX_BYTES", str(5 * 1024 * 1024)))
 
 app = FastAPI(title=APP_NAME)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax", https_only=False)
@@ -83,6 +85,14 @@ def init_db():
       iowait real not null, nice real not null, irq real not null, softirq real not null, steal real not null, created_at text not null
     );
     create index if not exists idx_cpu_metrics_ts on cpu_metrics(ts);
+    create table if not exists cdn_queries(
+      id integer primary key, bucket_ts integer not null, app text not null, domain text not null,
+      qtype text not null, count integer not null default 0, last_seen integer not null
+    );
+    create unique index if not exists idx_cdn_queries_unique on cdn_queries(bucket_ts, app, domain, qtype);
+    create index if not exists idx_cdn_queries_app_ts on cdn_queries(app, bucket_ts);
+    create index if not exists idx_cdn_queries_ts on cdn_queries(bucket_ts);
+    create table if not exists cdn_offsets(file text primary key, inode integer not null, offset integer not null, updated_at text not null);
     """)
     row = con.execute("select id from users where username=?", (ADMIN_USER,)).fetchone()
     if not row:
@@ -320,6 +330,114 @@ def check_domain_fast(domain):
     return blocked, reason, dig
 
 
+
+CDN_PATTERNS = {
+    "YouTube/Google": ["youtube.com", "googlevideo.com", "ytimg.com", "ggpht.com", "googleapis.com", "gvt1.com"],
+    "TikTok": ["tiktok.com", "tiktokcdn.com", "tiktokv.com", "byteoversea.com", "ibyteimg.com", "ttlivecdn.com", "muscdn.com"],
+    "Facebook/Meta": ["facebook.com", "fbcdn.net", "instagram.com", "cdninstagram.com", "whatsapp.net", "fbsbx.com", "messenger.com"],
+    "Netflix": ["netflix.com", "nflxvideo.net", "nflximg.net", "nflxso.net", "nflxext.com"],
+    "Shopee": ["shopee.co.id", "shopeemobile.com", "susercontent.com", "shopee.com"],
+    "Telegram": ["telegram.org", "t.me", "cdn-telegram.org", "telegram-cdn.org"],
+    "Cloudflare": ["cloudflare.com", "cloudflare.net", "r2.dev", "workers.dev"],
+    "Akamai": ["akamai.net", "akamaiedge.net", "akamaihd.net", "edgesuite.net", "edgekey.net"],
+    "Apple": ["apple.com", "icloud.com", "mzstatic.com", "cdn-apple.com", "aaplimg.com"],
+    "Microsoft": ["microsoft.com", "windowsupdate.com", "office.com", "live.com", "msn.com", "azureedge.net"],
+    "X/Twitter": ["twitter.com", "x.com", "twimg.com"],
+    "Video/CDN Other": ["vidio.com", "hotstar.com", "iqiyi.com", "viu.com"],
+}
+QUERY_DOMAIN_RE = re.compile(r"\(([^()\s]+)\):\s+query:\s+([^\s]+)\s+IN\s+([A-Z0-9]+)")
+
+
+def classify_cdn(domain):
+    d = normalize_domain(domain)
+    for app_name, suffixes in CDN_PATTERNS.items():
+        for suffix in suffixes:
+            if d == suffix or d.endswith('.' + suffix):
+                return app_name
+    return "Other"
+
+
+def querylog_ts(line):
+    m = re.match(r"^(\d{2}-[A-Za-z]{3}-\d{4} \d{2}:\d{2}:\d{2})", line)
+    if not m:
+        return int(time.time())
+    try:
+        return int(datetime.strptime(m.group(1), "%d-%b-%Y %H:%M:%S").replace(tzinfo=TZ).timestamp())
+    except Exception:
+        return int(time.time())
+
+
+def parse_cdn_logs():
+    p = Path(QUERY_LOG)
+    if not p.exists():
+        return {"parsed": 0, "matched": 0, "status": "missing query log"}
+    st = p.stat(); inode = st.st_ino; size = st.st_size
+    con = db()
+    try:
+        row = con.execute("select inode, offset from cdn_offsets where file=?", (QUERY_LOG,)).fetchone()
+        offset = int(row["offset"]) if row and int(row["inode"]) == inode and int(row["offset"]) <= size else 0
+        if size - offset > CDN_PARSE_MAX_BYTES:
+            offset = max(0, size - CDN_PARSE_MAX_BYTES)
+        with p.open("rb") as f:
+            f.seek(offset)
+            data = f.read(CDN_PARSE_MAX_BYTES)
+            new_offset = f.tell()
+        lines = data.decode(errors="ignore").splitlines()
+        agg = {}
+        parsed = matched = 0
+        for line in lines:
+            parsed += 1
+            m = QUERY_DOMAIN_RE.search(line)
+            if not m:
+                continue
+            domain = normalize_domain(m.group(2))
+            qtype = m.group(3).upper()
+            app_name = classify_cdn(domain)
+            if app_name == "Other":
+                continue
+            ts = querylog_ts(line)
+            bucket = (ts // 300) * 300
+            key = (bucket, app_name, domain, qtype)
+            agg[key] = agg.get(key, 0) + 1
+            matched += 1
+        for (bucket, app_name, domain, qtype), count in agg.items():
+            con.execute("""
+              insert into cdn_queries(bucket_ts,app,domain,qtype,count,last_seen) values(?,?,?,?,?,?)
+              on conflict(bucket_ts,app,domain,qtype) do update set count=count+excluded.count, last_seen=max(last_seen, excluded.last_seen)
+            """, (bucket, app_name, domain, qtype, count, bucket))
+        cutoff = int(time.time()) - CDN_RETENTION_DAYS * 86400
+        con.execute("delete from cdn_queries where bucket_ts < ?", (cutoff,))
+        con.execute("insert or replace into cdn_offsets(file,inode,offset,updated_at) values(?,?,?,?)", (QUERY_LOG, inode, new_offset, now_iso()))
+        con.commit()
+        return {"parsed": parsed, "matched": matched, "apps": len(set(k[1] for k in agg)), "offset": new_offset, "status": "ok"}
+    finally:
+        con.close()
+
+
+def cdn_range_seconds(range_name):
+    return {"1h": 3600, "1d": 86400, "7d": 7*86400, "30d": 30*86400}.get(range_name, 86400)
+
+
+def cdn_summary(range_name="1d", limit=20):
+    parse_status = parse_cdn_logs()
+    since = int(time.time()) - cdn_range_seconds(range_name)
+    con = db()
+    try:
+        apps = [dict(r) for r in con.execute("""
+          select app, sum(count) as queries, max(last_seen) as last_seen
+          from cdn_queries where bucket_ts >= ? group by app order by queries desc limit ?
+        """, (since, limit)).fetchall()]
+        domains = [dict(r) for r in con.execute("""
+          select app, domain, qtype, sum(count) as queries, max(last_seen) as last_seen
+          from cdn_queries where bucket_ts >= ? group by app, domain, qtype order by queries desc limit ?
+        """, (since, limit)).fetchall()]
+        for rows in (apps, domains):
+            for r in rows:
+                r["last_seen_local"] = format_local(r["last_seen"])
+        return {"range": range_name, "parse": parse_status, "apps": apps, "domains": domains, "retention_days": CDN_RETENTION_DAYS}
+    finally:
+        con.close()
+
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request):
     return templates.TemplateResponse("login.html", {"request": request, "error": None})
@@ -351,6 +469,21 @@ def graphs_page(request: Request):
     user = require_login(request)
     if not user: return RedirectResponse("/login")
     return templates.TemplateResponse("graphs.html", {"request": request})
+
+
+@app.get("/cdn", response_class=HTMLResponse)
+def cdn_page(request: Request, range: str = "1d"):
+    user = require_login(request)
+    if not user: return RedirectResponse("/login")
+    safe_range = range if range in {"1h", "1d", "7d", "30d"} else "1d"
+    return templates.TemplateResponse("cdn.html", {"request": request, "data": cdn_summary(safe_range), "range": safe_range})
+
+@app.get("/api/cdn")
+def api_cdn(request: Request, range: str = "1d"):
+    user = require_login(request)
+    if not user: return {"error": "unauthorized"}
+    safe_range = range if range in {"1h", "1d", "7d", "30d"} else "1d"
+    return cdn_summary(safe_range)
 
 @app.get("/domain-check", response_class=HTMLResponse)
 def domain_check_page(request: Request):
