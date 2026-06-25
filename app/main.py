@@ -1,5 +1,6 @@
 import asyncio, json, os, re, subprocess, sqlite3, time, xml.etree.ElementTree as ET
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import httpx, psutil
@@ -20,12 +21,37 @@ STATS_URL = os.getenv("BIND_STATS_URL", "http://127.0.0.1:8053/xml/v3/server")
 QUERY_LOG = os.getenv("QUERY_LOG", "/var/cache/bind/query.log")
 RPZ_LOG = os.getenv("RPZ_LOG", "/var/cache/bind/rpz.log")
 ZONE_FILE = os.getenv("ZONE_FILE", "/var/cache/bind/db.trustpositifkominfo")
+APP_TZ = os.getenv("APP_TZ", "Asia/Jakarta")
+TZ = ZoneInfo(APP_TZ)
 
 app = FastAPI(title=APP_NAME)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax", https_only=False)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def now_local():
+    return datetime.now(TZ)
+
+def now_iso():
+    return now_local().isoformat()
+
+def format_local(ts):
+    try:
+        return datetime.fromtimestamp(int(ts), TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+    except Exception:
+        return str(ts)
+
+def localize_bind_time(value):
+    if not value or value == "-":
+        return value
+    try:
+        dt = datetime.strptime(value, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=ZoneInfo("UTC"))
+        return dt.astimezone(TZ).strftime("%a, %d %b %Y %H:%M:%S %Z")
+    except Exception:
+        return value
+
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])$", re.I)
 LAST_SAMPLE = {"ts": 0.0, "dns": {}, "cpu": None}
 
@@ -60,7 +86,7 @@ def init_db():
     """)
     row = con.execute("select id from users where username=?", (ADMIN_USER,)).fetchone()
     if not row:
-        con.execute("insert into users(username,password_hash,role,enabled,created_at) values(?,?,?,?,?)", (ADMIN_USER, pwd_context.hash(ADMIN_PASSWORD), "admin", 1, datetime.utcnow().isoformat()))
+        con.execute("insert into users(username,password_hash,role,enabled,created_at) values(?,?,?,?,?)", (ADMIN_USER, pwd_context.hash(ADMIN_PASSWORD), "admin", 1, now_iso()))
     con.commit(); con.close()
 
 init_db()
@@ -98,6 +124,9 @@ def parse_zonestatus(text):
             key, value = line.split(":", 1)
             data[key.strip().replace(" ", "_").lower()] = value.strip()
     data["ok"] = "serial" in data and "nodes" in data
+    for k in ["last_loaded", "next_refresh", "expires"]:
+        if k in data:
+            data[k + "_local"] = localize_bind_time(data[k])
     return data
 
 
@@ -171,11 +200,11 @@ def collect_metrics():
     }
     LAST_SAMPLE["ts"] = now
     LAST_SAMPLE["dns"] = {"total": total, "cache_hits": cache_hits, "rpz_hits": rpz_hits, "prefetch": prefetch, "nxdomain": nxdomain, "servfail": servfail}
-    save_metric("dns_metrics", ["ts","total_qps","cache_hit_qps","rpz_hit_qps","prefetch_qps","nxdomain_qps","servfail_qps","total_queries","cache_hits","rpz_hits","prefetch","nxdomain","servfail","created_at"], [ts,metrics["total_qps"],metrics["cache_hit_qps"],metrics["rpz_hit_qps"],metrics["prefetch_qps"],metrics["nxdomain_qps"],metrics["servfail_qps"],total,cache_hits,rpz_hits,prefetch,nxdomain,servfail,datetime.utcnow().isoformat()])
-    save_metric("qps_metrics", ["ts","qps","queries","created_at"], [ts, metrics["total_qps"], total, datetime.utcnow().isoformat()])
+    save_metric("dns_metrics", ["ts","total_qps","cache_hit_qps","rpz_hit_qps","prefetch_qps","nxdomain_qps","servfail_qps","total_queries","cache_hits","rpz_hits","prefetch","nxdomain","servfail","created_at"], [ts,metrics["total_qps"],metrics["cache_hit_qps"],metrics["rpz_hit_qps"],metrics["prefetch_qps"],metrics["nxdomain_qps"],metrics["servfail_qps"],total,cache_hits,rpz_hits,prefetch,nxdomain,servfail,now_iso()])
+    save_metric("qps_metrics", ["ts","qps","queries","created_at"], [ts, metrics["total_qps"], total, now_iso()])
     cpu = psutil.cpu_times_percent(interval=0.1)
     cpu_m = {k: float(getattr(cpu, k, 0.0)) for k in ["user","system","idle","iowait","nice","irq","softirq","steal"]}
-    save_metric("cpu_metrics", ["ts","user","system","idle","iowait","nice","irq","softirq","steal","created_at"], [ts,cpu_m["user"],cpu_m["system"],cpu_m["idle"],cpu_m["iowait"],cpu_m["nice"],cpu_m["irq"],cpu_m["softirq"],cpu_m["steal"],datetime.utcnow().isoformat()])
+    save_metric("cpu_metrics", ["ts","user","system","idle","iowait","nice","irq","softirq","steal","created_at"], [ts,cpu_m["user"],cpu_m["system"],cpu_m["idle"],cpu_m["iowait"],cpu_m["nice"],cpu_m["irq"],cpu_m["softirq"],cpu_m["steal"],now_iso()])
     return metrics
 
 
@@ -217,7 +246,7 @@ def bind_stats():
 
 def get_qps_history_range(range_name="1h"):
     rows = graph_rows("qps_metrics", ["qps"], range_name)
-    return [{"ts": r["ts"], "qps": r["qps"], "queries": 0} for r in rows]
+    return [{"ts": r["ts"], "time": format_local(r["ts"]), "qps": r["qps"], "queries": 0} for r in rows]
 
 
 def get_total_qps_samples():
@@ -282,7 +311,7 @@ def login_page(request: Request):
 def login(request: Request, username: str = Form(...), password: str = Form(...)):
     con = db(); row = con.execute("select * from users where username=? and enabled=1", (username,)).fetchone()
     ok = bool(row and pwd_context.verify(password, row["password_hash"]))
-    con.execute("insert into audit_login(username,ip_address,result,created_at) values(?,?,?,?)", (username, request.client.host, "success" if ok else "failed", datetime.utcnow().isoformat()))
+    con.execute("insert into audit_login(username,ip_address,result,created_at) values(?,?,?,?)", (username, request.client.host, "success" if ok else "failed", now_iso()))
     con.commit(); con.close()
     if not ok:
         return templates.TemplateResponse("login.html", {"request": request, "error": "Login gagal"})
@@ -298,7 +327,7 @@ def dashboard(request: Request):
     user = require_login(request)
     if not user: return RedirectResponse("/login")
     zone_raw = zonestatus()
-    return templates.TemplateResponse("dashboard.html", {"request": request, "user": user, "active": service_active(), "rndc": rndc_status(), "zone": zone_raw, "zone_info": parse_zonestatus(zone_raw), "sys": system_metrics(), "stats": bind_stats(), "rpz_tail": tail(RPZ_LOG, 20)})
+    return templates.TemplateResponse("dashboard.html", {"request": request, "user": user, "active": service_active(), "rndc": rndc_status(), "zone": zone_raw, "zone_info": parse_zonestatus(zone_raw), "sys": system_metrics(), "stats": bind_stats(), "app_tz": APP_TZ, "now_local": now_local().strftime("%Y-%m-%d %H:%M:%S %Z"), "rpz_tail": tail(RPZ_LOG, 20)})
 
 @app.get("/graphs", response_class=HTMLResponse)
 def graphs_page(request: Request):
@@ -322,7 +351,7 @@ def domain_check(request: Request, domain: str = Form(...)):
     else:
         in_rpz, match, dig = check_domain_fast(d)
         result = {"domain": d, "in_rpz": in_rpz, "match": match, "dig": dig}
-        con = db(); con.execute("insert into domain_checks(domain,in_rpz,matched_record,dig_result,checked_by,checked_at) values(?,?,?,?,?,?)", (d, 1 if in_rpz else 0, match, dig, user, datetime.utcnow().isoformat())); con.commit(); con.close()
+        con = db(); con.execute("insert into domain_checks(domain,in_rpz,matched_record,dig_result,checked_by,checked_at) values(?,?,?,?,?,?)", (d, 1 if in_rpz else 0, match, dig, user, now_iso())); con.commit(); con.close()
     return templates.TemplateResponse("domain_check.html", {"request": request, "result": result})
 
 @app.get("/logs", response_class=HTMLResponse)

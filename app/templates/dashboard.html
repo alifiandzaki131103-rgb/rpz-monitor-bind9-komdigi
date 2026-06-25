@@ -1,12 +1,13 @@
 {% extends "base.html" %}
 {% block content %}
 <h1>Dashboard</h1>
+<p class="muted">Local time: {{ now_local }} ({{ app_tz }})</p>
 
 <div class="grid">
   <div class="card"><h3>BIND Status</h3><p class="big {{ 'ok' if active=='active' else 'bad' }}">{{ active }}</p></div>
   <div class="card"><h3>System</h3><p>CPU {{ sys.cpu }}%</p><p>RAM {{ sys.mem }}%</p><p>Disk {{ sys.disk }}%</p><p>Load {{ '%.2f'|format(sys.load[0]) }}, {{ '%.2f'|format(sys.load[1]) }}, {{ '%.2f'|format(sys.load[2]) }}</p></div>
   <div class="card"><h3>BIND Stats Channel</h3><p class="{{ 'ok' if stats.ok else 'bad' }}">{{ stats.status }}</p><p>Total request counter: {{ stats.queries }}</p><p>Current QPS: <b>{{ stats.qps }}</b></p>{% if stats.error %}<small class="bad">{{ stats.error }}</small>{% endif %}</div>
-  <div class="card"><h3>RPZ Zone</h3><p>Zone: {{ zone_info.name or 'trustpositifkominfo' }}</p><p>Serial: {{ zone_info.serial or '-' }}</p><p>Nodes: {{ zone_info.nodes or '-' }}</p><p>Last loaded: {{ zone_info.last_loaded or '-' }}</p><p>Next refresh: {{ zone_info.next_refresh or '-' }}</p></div>
+  <div class="card"><h3>RPZ Zone</h3><p>Zone: {{ zone_info.name or 'trustpositifkominfo' }}</p><p>Serial: {{ zone_info.serial or '-' }}</p><p>Nodes: {{ zone_info.nodes or '-' }}</p><p>Last loaded: {{ zone_info.last_loaded_local or zone_info.last_loaded or '-' }}</p><p>Next refresh: {{ zone_info.next_refresh_local or zone_info.next_refresh or '-' }}</p></div>
 </div>
 
 <h2>RNDC Status</h2><pre>{{ rndc }}</pre>
