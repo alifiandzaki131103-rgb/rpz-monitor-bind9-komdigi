@@ -26,6 +26,12 @@
   </div>
 
   <div class="card">
+    <h2>Top CDN Pie</h2>
+    <canvas id="cdnPie" height="260"></canvas>
+    <div id="cdnPieLegend" class="legend-table"></div>
+  </div>
+
+  <div class="card" style="grid-column:1/-1">
     <h2>Top Domains</h2>
     <table class="data-table">
       <thead><tr><th>App</th><th>Domain</th><th>Type</th><th>Queries</th><th>IP</th><th>ASN</th><th>Org</th><th>ASN Category</th><th>Last Seen</th></tr></thead>
@@ -39,4 +45,67 @@
     </table>
   </div>
 </div>
+
+<script>
+const cdnApps = {{ data.apps | tojson }};
+const pieColors = ['#22c55e','#60a5fa','#f97316','#c084fc','#f87171','#facc15','#14b8a6','#fb7185','#a3e635','#38bdf8'];
+function resizePie(canvas, ctx) {
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = canvas.clientWidth * ratio;
+  canvas.height = canvas.clientHeight * ratio;
+  ctx.setTransform(ratio,0,0,ratio,0,0);
+}
+function drawCdnPie() {
+  const canvas = document.getElementById('cdnPie');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  resizePie(canvas, ctx);
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  ctx.clearRect(0,0,w,h);
+  ctx.fillStyle = '#020617';
+  ctx.fillRect(0,0,w,h);
+  const rows = cdnApps.slice(0, 10).map(r => ({name: r.app, value: Number(r.queries || 0)})).filter(r => r.value > 0);
+  const total = rows.reduce((a,r) => a + r.value, 0);
+  const cx = w / 2, cy = h / 2, radius = Math.max(50, Math.min(w, h) * 0.34);
+  if (!total) {
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '14px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('No CDN data yet', cx, cy);
+    document.getElementById('cdnPieLegend').innerHTML = '';
+    return;
+  }
+  let start = -Math.PI / 2;
+  rows.forEach((r, i) => {
+    const angle = (r.value / total) * Math.PI * 2;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, radius, start, start + angle);
+    ctx.closePath();
+    ctx.fillStyle = pieColors[i % pieColors.length];
+    ctx.fill();
+    start += angle;
+  });
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius * 0.55, 0, Math.PI * 2);
+  ctx.fillStyle = '#020617';
+  ctx.fill();
+  ctx.fillStyle = '#e5e7eb';
+  ctx.font = 'bold 18px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText(total.toLocaleString('id-ID'), cx, cy - 3);
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '12px Arial';
+  ctx.fillText('queries', cx, cy + 16);
+  let html = '<table><thead><tr><th>CDN/App</th><th>Queries</th><th>%</th></tr></thead><tbody>';
+  rows.forEach((r, i) => {
+    const pct = ((r.value / total) * 100).toFixed(1);
+    html += `<tr><td><span class="sw" style="background:${pieColors[i % pieColors.length]}"></span>${r.name}</td><td>${r.value.toLocaleString('id-ID')}</td><td>${pct}%</td></tr>`;
+  });
+  html += '</tbody></table>';
+  document.getElementById('cdnPieLegend').innerHTML = html;
+}
+window.addEventListener('resize', drawCdnPie);
+drawCdnPie();
+</script>
 {% endblock %}
