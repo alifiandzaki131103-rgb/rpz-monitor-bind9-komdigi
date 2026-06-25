@@ -45,6 +45,8 @@ def init_db():
     create table if not exists users(id integer primary key, username text unique, password_hash text, role text, enabled integer, created_at text);
     create table if not exists domain_checks(id integer primary key, domain text, in_rpz integer, matched_record text, dig_result text, checked_by text, checked_at text);
     create table if not exists audit_login(id integer primary key, username text, ip_address text, result text, created_at text);
+    create table if not exists qps_metrics(id integer primary key, ts integer not null, qps real not null, queries integer not null, created_at text not null);
+    create index if not exists idx_qps_metrics_ts on qps_metrics(ts);
     """)
     row = con.execute("select id from users where username=?", (ADMIN_USER,)).fetchone()
     if not row:
@@ -96,6 +98,37 @@ def system_metrics():
     return {"cpu": psutil.cpu_percent(interval=0.1), "mem": psutil.virtual_memory().percent, "disk": psutil.disk_usage("/").percent, "load": os.getloadavg()}
 
 
+def save_qps_metric(ts, qps, queries):
+    try:
+        con = db()
+        last = con.execute("select ts, qps, queries from qps_metrics order by ts desc limit 1").fetchone()
+        if not last or int(ts) > int(last["ts"]):
+            con.execute(
+                "insert into qps_metrics(ts,qps,queries,created_at) values(?,?,?,?)",
+                (int(ts), float(qps), int(queries), datetime.utcnow().isoformat()),
+            )
+            # Keep last 7 days at 5-second polling: about 120960 rows.
+            cutoff = int(time.time()) - (7 * 24 * 60 * 60)
+            con.execute("delete from qps_metrics where ts < ?", (cutoff,))
+        con.commit(); con.close()
+    except Exception:
+        pass
+
+
+def get_qps_history(limit=120):
+    con = db()
+    rows = con.execute("select ts,qps,queries from qps_metrics order by ts desc limit ?", (limit,)).fetchall()
+    con.close()
+    return [dict(r) for r in reversed(rows)]
+
+
+def get_total_qps_samples():
+    con = db()
+    row = con.execute("select count(*) as c from qps_metrics").fetchone()
+    con.close()
+    return row["c"] if row else 0
+
+
 def bind_stats():
     data = {"ok": False, "queries": 0, "qps": 0.0, "status": "ERROR"}
     now = time.time()
@@ -117,7 +150,9 @@ def bind_stats():
         if prev_ts and now > prev_ts and total >= prev_queries:
             data["qps"] = round((total - prev_queries) / (now - prev_ts), 2)
         LAST_QUERY_SAMPLE.update({"ts": now, "queries": total})
-        QPS_HISTORY.append({"ts": int(now), "qps": data["qps"], "queries": total})
+        sample = {"ts": int(now), "qps": data["qps"], "queries": total}
+        QPS_HISTORY.append(sample)
+        save_qps_metric(sample["ts"], sample["qps"], sample["queries"])
     except Exception as e:
         data["error"] = str(e)
         data["status"] = "ERROR"
@@ -232,7 +267,8 @@ def api_qps(request: Request):
     if not user:
         return {"error": "unauthorized"}
     stats = bind_stats()
-    return {"current": stats, "history": list(QPS_HISTORY)}
+    history = get_qps_history(120)
+    return {"current": stats, "history": history, "stored_samples": get_total_qps_samples()}
 
 
 @app.get("/health")
