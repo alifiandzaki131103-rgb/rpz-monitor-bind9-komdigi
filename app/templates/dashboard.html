@@ -19,7 +19,8 @@
   <div class="card">
     <h3>BIND Stats Channel</h3>
     <p class="{{ 'ok' if stats.ok else 'bad' }}">{{ stats.status }}</p>
-    <p>Total request counter: {{ stats.queries }}</p>
+    <p>Total request counter: <span id="totalQueries">{{ stats.queries }}</span></p>
+    <p>Current QPS: <b id="currentQps">{{ stats.qps }}</b></p>
     {% if stats.error %}<small class="bad">{{ stats.error }}</small>{% endif %}
   </div>
 
@@ -33,6 +34,11 @@
   </div>
 </div>
 
+<div class="card">
+  <h2>DNS QPS Graph</h2>
+  <canvas id="qpsChart" height="110"></canvas>
+</div>
+
 <h2>RNDC Status</h2>
 <pre>{{ rndc }}</pre>
 
@@ -42,4 +48,64 @@
 <h2>Recent RPZ Log</h2>
 <pre>{% for l in rpz_tail %}{{ l }}
 {% endfor %}</pre>
+
+<script>
+const canvas = document.getElementById('qpsChart');
+const ctx = canvas.getContext('2d');
+let points = [];
+
+function resizeCanvas() {
+  const ratio = window.devicePixelRatio || 1;
+  canvas.width = canvas.clientWidth * ratio;
+  canvas.height = canvas.clientHeight * ratio;
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+}
+
+function drawChart() {
+  resizeCanvas();
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#020617';
+  ctx.fillRect(0, 0, w, h);
+  ctx.strokeStyle = '#334155';
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i++) {
+    const y = (h / 4) * i;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+  const maxQps = Math.max(1, ...points.map(p => p.qps));
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '12px Arial';
+  ctx.fillText('max ' + maxQps.toFixed(2) + ' qps', 10, 18);
+  if (points.length < 2) return;
+  ctx.strokeStyle = '#38bdf8';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const x = (w / Math.max(1, points.length - 1)) * i;
+    const y = h - ((p.qps / maxQps) * (h - 24)) - 8;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+async function refreshQps() {
+  try {
+    const r = await fetch('/api/qps', {cache: 'no-store'});
+    const data = await r.json();
+    if (data.error) return;
+    points = data.history || [];
+    document.getElementById('currentQps').textContent = data.current.qps;
+    document.getElementById('totalQueries').textContent = data.current.queries;
+    drawChart();
+  } catch (e) {
+    console.log(e);
+  }
+}
+
+window.addEventListener('resize', drawChart);
+refreshQps();
+setInterval(refreshQps, 5000);
+</script>
 {% endblock %}

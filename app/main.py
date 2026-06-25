@@ -1,4 +1,5 @@
 import os, re, subprocess, sqlite3, time, xml.etree.ElementTree as ET
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -27,6 +28,8 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 DOMAIN_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])$", re.I)
+QPS_HISTORY = deque(maxlen=120)
+LAST_QUERY_SAMPLE = {"ts": 0.0, "queries": 0}
 
 
 def db():
@@ -94,7 +97,8 @@ def system_metrics():
 
 
 def bind_stats():
-    data = {"ok": False, "queries": 0, "status": "ERROR"}
+    data = {"ok": False, "queries": 0, "qps": 0.0, "status": "ERROR"}
+    now = time.time()
     try:
         r = httpx.get(STATS_URL, timeout=3)
         data["ok"] = r.status_code == 200
@@ -103,9 +107,17 @@ def bind_stats():
         total = 0
         for counter in root.iter():
             if counter.tag.endswith("counter") and (counter.attrib.get("name", "").lower() in ["requestv4", "requestv6", "queries"]):
-                try: total += int(counter.text or 0)
-                except: pass
+                try:
+                    total += int(counter.text or 0)
+                except Exception:
+                    pass
         data["queries"] = total
+        prev_ts = LAST_QUERY_SAMPLE["ts"]
+        prev_queries = LAST_QUERY_SAMPLE["queries"]
+        if prev_ts and now > prev_ts and total >= prev_queries:
+            data["qps"] = round((total - prev_queries) / (now - prev_ts), 2)
+        LAST_QUERY_SAMPLE.update({"ts": now, "queries": total})
+        QPS_HISTORY.append({"ts": int(now), "qps": data["qps"], "queries": total})
     except Exception as e:
         data["error"] = str(e)
         data["status"] = "ERROR"
@@ -212,6 +224,16 @@ def logs(request: Request):
     user = require_login(request)
     if not user: return RedirectResponse("/login")
     return templates.TemplateResponse("logs.html", {"request": request, "query": tail(QUERY_LOG, 120), "rpz": tail(RPZ_LOG, 120)})
+
+
+@app.get("/api/qps")
+def api_qps(request: Request):
+    user = require_login(request)
+    if not user:
+        return {"error": "unauthorized"}
+    stats = bind_stats()
+    return {"current": stats, "history": list(QPS_HISTORY)}
+
 
 @app.get("/health")
 def health():
