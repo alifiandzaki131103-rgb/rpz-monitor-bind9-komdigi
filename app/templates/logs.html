@@ -1,0 +1,3 @@
+{% extends "base.html" %}{% block content %}<h1>Logs</h1><div class="grid2"><div><h2>Query Log</h2><pre>{% for l in query %}{{ l }}
+{% endfor %}</pre></div><div><h2>RPZ Log</h2><pre>{% for l in rpz %}{{ l }}
+{% endfor %}</pre></div></div>{% endblock %}
