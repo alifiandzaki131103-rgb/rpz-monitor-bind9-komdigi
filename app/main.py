@@ -1,4 +1,4 @@
-import asyncio, json, os, re, subprocess, sqlite3, time, xml.etree.ElementTree as ET
+import asyncio, json, os, re, socket, subprocess, sqlite3, time, xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -25,6 +25,8 @@ APP_TZ = os.getenv("APP_TZ", "Asia/Jakarta")
 TZ = ZoneInfo(APP_TZ)
 CDN_RETENTION_DAYS = int(os.getenv("CDN_RETENTION_DAYS", "30"))
 CDN_PARSE_MAX_BYTES = int(os.getenv("CDN_PARSE_MAX_BYTES", str(5 * 1024 * 1024)))
+CDN_ENRICH_LIMIT = int(os.getenv("CDN_ENRICH_LIMIT", "50"))
+CDN_ENRICH_TTL = int(os.getenv("CDN_ENRICH_TTL", str(7 * 86400)))
 
 app = FastAPI(title=APP_NAME)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax", https_only=False)
@@ -93,6 +95,11 @@ def init_db():
     create index if not exists idx_cdn_queries_app_ts on cdn_queries(app, bucket_ts);
     create index if not exists idx_cdn_queries_ts on cdn_queries(bucket_ts);
     create table if not exists cdn_offsets(file text primary key, inode integer not null, offset integer not null, updated_at text not null);
+    create table if not exists domain_enrichment(
+      domain text primary key, ip text, asn text, prefix text, cc text, registry text,
+      org text, category text, updated_ts integer not null, updated_at text not null
+    );
+    create index if not exists idx_domain_enrichment_category on domain_enrichment(category);
     """)
     row = con.execute("select id from users where username=?", (ADMIN_USER,)).fetchone()
     if not row:
@@ -418,6 +425,103 @@ def cdn_range_seconds(range_name):
     return {"1h": 3600, "1d": 86400, "7d": 7*86400, "30d": 30*86400}.get(range_name, 86400)
 
 
+
+
+def org_category(org):
+    o = (org or "").upper()
+    if any(x in o for x in ["GOOGLE", "YOUTUBE"]): return "YouTube/Google"
+    if any(x in o for x in ["META", "FACEBOOK", "WHATSAPP", "INSTAGRAM"]): return "Facebook/Meta"
+    if any(x in o for x in ["BYTEDANCE", "TIKTOK", "MUSICAL"]): return "TikTok"
+    if "NETFLIX" in o: return "Netflix"
+    if any(x in o for x in ["AMAZON", "AWS", "CLOUDFRONT"]): return "AWS/CloudFront"
+    if "CLOUDFLARE" in o: return "Cloudflare"
+    if "AKAMAI" in o: return "Akamai"
+    if any(x in o for x in ["MICROSOFT", "AZURE"]): return "Microsoft"
+    if "APPLE" in o: return "Apple"
+    if "TELEGRAM" in o: return "Telegram"
+    if "SHOPEE" in o or "SEA" in o: return "Shopee"
+    return org[:60] if org else "Unknown ASN"
+
+
+def resolve_domain_ip(domain):
+    try:
+        infos = socket.getaddrinfo(domain, None, socket.AF_INET, socket.SOCK_STREAM)
+        return infos[0][4][0] if infos else None
+    except Exception:
+        return None
+
+
+def dig_txt(name, timeout=3):
+    out = run(["dig", "+short", "TXT", name], timeout)
+    return " ".join(x.strip().strip('"') for x in out.splitlines() if x.strip())
+
+
+def cymru_ip_lookup(ip):
+    try:
+        rev = ".".join(reversed(ip.split(".")))
+        txt = dig_txt(f"{rev}.origin.asn.cymru.com", 3)
+        if not txt or "|" not in txt:
+            return {}
+        parts = [x.strip() for x in txt.replace('"', '').split("|")]
+        asn = parts[0] if len(parts) > 0 else ""
+        prefix = parts[1] if len(parts) > 1 else ""
+        cc = parts[2] if len(parts) > 2 else ""
+        registry = parts[3] if len(parts) > 3 else ""
+        org = ""
+        if asn:
+            orgtxt = dig_txt(f"AS{asn}.asn.cymru.com", 3)
+            oparts = [x.strip() for x in orgtxt.replace('"', '').split("|")]
+            org = oparts[4] if len(oparts) > 4 else ""
+        return {"asn": asn, "prefix": prefix, "cc": cc, "registry": registry, "org": org}
+    except Exception:
+        return {}
+
+
+def enrich_domain(domain):
+    d = normalize_domain(domain)
+    now_ts = int(time.time())
+    con = db()
+    try:
+        row = con.execute("select * from domain_enrichment where domain=?", (d,)).fetchone()
+        if row and now_ts - int(row["updated_ts"]) < CDN_ENRICH_TTL:
+            return dict(row)
+        ip = resolve_domain_ip(d)
+        data = cymru_ip_lookup(ip) if ip else {}
+        pattern_cat = classify_cdn(d)
+        asn_cat = org_category(data.get("org", "")) if data else "Unresolved"
+        category = pattern_cat if pattern_cat != "Other" else asn_cat
+        vals = (d, ip or "", data.get("asn", ""), data.get("prefix", ""), data.get("cc", ""), data.get("registry", ""), data.get("org", ""), category, now_ts, now_iso())
+        con.execute("""
+          insert into domain_enrichment(domain,ip,asn,prefix,cc,registry,org,category,updated_ts,updated_at)
+          values(?,?,?,?,?,?,?,?,?,?)
+          on conflict(domain) do update set ip=excluded.ip, asn=excluded.asn, prefix=excluded.prefix, cc=excluded.cc,
+          registry=excluded.registry, org=excluded.org, category=excluded.category, updated_ts=excluded.updated_ts, updated_at=excluded.updated_at
+        """, vals)
+        con.commit()
+        row = con.execute("select * from domain_enrichment where domain=?", (d,)).fetchone()
+        return dict(row) if row else {"domain": d, "category": category, "ip": ip or ""}
+    finally:
+        con.close()
+
+
+def enrich_top_domains(range_name="1d", limit=None):
+    limit = limit or CDN_ENRICH_LIMIT
+    since = int(time.time()) - cdn_range_seconds(range_name)
+    con = db()
+    try:
+        rows = con.execute("""
+          select domain, sum(count) as queries from cdn_queries
+          where bucket_ts >= ? group by domain order by queries desc limit ?
+        """, (since, limit)).fetchall()
+    finally:
+        con.close()
+    enriched = []
+    for r in rows:
+        e = enrich_domain(r["domain"])
+        e["queries"] = int(r["queries"])
+        enriched.append(e)
+    return enriched
+
 def cdn_summary(range_name="1d", limit=20):
     parse_status = parse_cdn_logs()
     since = int(time.time()) - cdn_range_seconds(range_name)
@@ -434,7 +538,14 @@ def cdn_summary(range_name="1d", limit=20):
         for rows in (apps, domains):
             for r in rows:
                 r["last_seen_local"] = format_local(r["last_seen"])
-        return {"range": range_name, "parse": parse_status, "apps": apps, "domains": domains, "retention_days": CDN_RETENTION_DAYS}
+        enrich_map = {e["domain"]: e for e in enrich_top_domains(range_name, min(CDN_ENRICH_LIMIT, limit))}
+        for r in domains:
+            e = enrich_map.get(r["domain"], {})
+            r["ip"] = e.get("ip", "")
+            r["asn"] = e.get("asn", "")
+            r["org"] = e.get("org", "")
+            r["category"] = e.get("category", r["app"])
+        return {"range": range_name, "parse": parse_status, "apps": apps, "domains": domains, "enriched": list(enrich_map.values()), "retention_days": CDN_RETENTION_DAYS}
     finally:
         con.close()
 

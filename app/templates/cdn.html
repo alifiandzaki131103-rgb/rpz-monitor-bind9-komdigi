@@ -28,12 +28,12 @@
   <div class="card">
     <h2>Top Domains</h2>
     <table class="data-table">
-      <thead><tr><th>App</th><th>Domain</th><th>Type</th><th>Queries</th><th>Last Seen</th></tr></thead>
+      <thead><tr><th>App</th><th>Domain</th><th>Type</th><th>Queries</th><th>IP</th><th>ASN</th><th>Org</th><th>ASN Category</th><th>Last Seen</th></tr></thead>
       <tbody>
       {% for row in data.domains %}
-        <tr><td>{{ row.app }}</td><td class="mono">{{ row.domain }}</td><td>{{ row.qtype }}</td><td>{{ row.queries }}</td><td>{{ row.last_seen_local }}</td></tr>
+        <tr><td>{{ row.app }}</td><td class="mono">{{ row.domain }}</td><td>{{ row.qtype }}</td><td>{{ row.queries }}</td><td>{{ row.ip or '-' }}</td><td>{{ row.asn or '-' }}</td><td>{{ row.org or '-' }}</td><td>{{ row.category or row.app }}</td><td>{{ row.last_seen_local }}</td></tr>
       {% else %}
-        <tr><td colspan="5" class="muted">No data yet.</td></tr>
+        <tr><td colspan="9" class="muted">No data yet.</td></tr>
       {% endfor %}
       </tbody>
     </table>
