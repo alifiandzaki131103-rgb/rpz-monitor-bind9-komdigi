@@ -306,6 +306,13 @@ def logs(request: Request):
     if not user: return RedirectResponse("/login")
     return templates.TemplateResponse("logs.html", {"request": request, "query": tail(QUERY_LOG, 120), "rpz": tail(RPZ_LOG, 120)})
 
+@app.get("/api/logs")
+def api_logs(request: Request, lines: int = 120):
+    user = require_login(request)
+    if not user: return {"error": "unauthorized"}
+    safe_lines = max(10, min(lines, 500))
+    return {"query": tail(QUERY_LOG, safe_lines), "rpz": tail(RPZ_LOG, safe_lines), "ts": int(time.time())}
+
 @app.get("/api/qps")
 def api_qps(request: Request, range: str = "1h"):
     user = require_login(request)

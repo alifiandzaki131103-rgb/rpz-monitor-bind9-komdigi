@@ -1,3 +1,56 @@
-{% extends "base.html" %}{% block content %}<h1>Logs</h1><div class="grid2"><div><h2>Query Log</h2><pre>{% for l in query %}{{ l }}
-{% endfor %}</pre></div><div><h2>RPZ Log</h2><pre>{% for l in rpz %}{{ l }}
-{% endfor %}</pre></div></div>{% endblock %}
+{% extends "base.html" %}
+{% block content %}
+<div class="chart-head">
+  <h1>Logs</h1>
+  <div class="range-buttons">
+    <span id="logStatus" class="muted">Auto refresh: 5s</span>
+    <button type="button" id="toggleRefresh" class="range-btn active">Pause</button>
+  </div>
+</div>
+
+<div class="grid2">
+  <div>
+    <h2>Query Log</h2>
+    <pre id="queryLog">{% for l in query %}{{ l }}
+{% endfor %}</pre>
+  </div>
+  <div>
+    <h2>RPZ Log</h2>
+    <pre id="rpzLog">{% for l in rpz %}{{ l }}
+{% endfor %}</pre>
+  </div>
+</div>
+
+<script>
+let autoRefresh = true;
+let timer = null;
+function renderLines(id, lines) {
+  const el = document.getElementById(id);
+  const nearBottom = (el.scrollTop + el.clientHeight) >= (el.scrollHeight - 40);
+  el.textContent = (lines || []).join('\n');
+  if (nearBottom) el.scrollTop = el.scrollHeight;
+}
+async function refreshLogs() {
+  if (!autoRefresh) return;
+  try {
+    const r = await fetch('/api/logs?lines=120', {cache: 'no-store'});
+    const data = await r.json();
+    if (data.error) return;
+    renderLines('queryLog', data.query);
+    renderLines('rpzLog', data.rpz);
+    const d = new Date((data.ts || Date.now()/1000) * 1000);
+    document.getElementById('logStatus').textContent = 'Last update: ' + d.toLocaleTimeString('id-ID') + ' | Auto refresh: 5s';
+  } catch (e) {
+    document.getElementById('logStatus').textContent = 'Refresh error';
+  }
+}
+document.getElementById('toggleRefresh').addEventListener('click', () => {
+  autoRefresh = !autoRefresh;
+  document.getElementById('toggleRefresh').textContent = autoRefresh ? 'Pause' : 'Resume';
+  document.getElementById('toggleRefresh').classList.toggle('active', autoRefresh);
+  if (autoRefresh) refreshLogs();
+});
+refreshLogs();
+timer = setInterval(refreshLogs, 5000);
+</script>
+{% endblock %}
