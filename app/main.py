@@ -152,7 +152,12 @@ def dig_domain(domain):
 def check_domain_fast(domain):
     dig = dig_domain(domain)
     upper = dig.upper()
-    blocked = "NXDOMAIN" in upper or "CNAME ." in dig or "0.0.0.0" in dig
+    blocked = (
+        "NXDOMAIN" in upper
+        or "CNAME ." in dig
+        or "0.0.0.0" in dig
+        or "lamanlabuh.aduankonten.id" in dig.lower()
+    )
     reason = "DNS RPZ policy result" if blocked else "not blocked by local resolver result"
     return blocked, reason, dig
 
