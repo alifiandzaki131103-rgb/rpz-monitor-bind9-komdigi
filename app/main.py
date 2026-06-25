@@ -158,10 +158,12 @@ def get_counter_map():
         ctype = group.attrib.get("type", "")
         for counter in group:
             if counter.tag.endswith("counter"):
+                key = f"{ctype}:{counter.attrib.get('name')}"
                 try:
-                    counters[f"{ctype}:{counter.attrib.get('name')}"] = int(counter.text or 0)
+                    value = int(counter.text or 0)
                 except Exception:
-                    counters[f"{ctype}:{counter.attrib.get('name')}"] = 0
+                    value = 0
+                counters[key] = max(counters.get(key, 0), value)
     return counters
 
 
@@ -177,7 +179,12 @@ def collect_metrics():
     now = time.time(); ts = int(now)
     counters = get_counter_map()
     total = counters.get("nsstat:Requestv4", 0) + counters.get("nsstat:Requestv6", 0)
-    cache_hits = counters.get("resolver:CacheHits", counters.get("resstat:CacheHits", 0))
+    cache_hits = max(
+        counters.get("cachestats:CacheHits", 0),
+        counters.get("resolver:CacheHits", 0),
+        counters.get("resstats:CacheHits", 0),
+        counters.get("resstat:CacheHits", 0),
+    )
     rpz_hits = counters.get("nsstat:RPZRewrites", 0)
     prefetch = counters.get("nsstat:Prefetch", 0)
     nxdomain = counters.get("rcode:NXDOMAIN", counters.get("nsstat:QryNXDOMAIN", 0))
