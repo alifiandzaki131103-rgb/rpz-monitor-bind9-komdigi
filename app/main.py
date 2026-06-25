@@ -87,6 +87,11 @@ def init_db():
       iowait real not null, nice real not null, irq real not null, softirq real not null, steal real not null, created_at text not null
     );
     create index if not exists idx_cpu_metrics_ts on cpu_metrics(ts);
+    create table if not exists memory_metrics(
+      id integer primary key, ts integer not null, used_gb real not null, available_gb real not null,
+      free_gb real not null, cached_gb real not null, buffers_gb real not null, percent real not null, created_at text not null
+    );
+    create index if not exists idx_memory_metrics_ts on memory_metrics(ts);
     create table if not exists cdn_queries(
       id integer primary key, bucket_ts integer not null, app text not null, domain text not null,
       qtype text not null, count integer not null default 0, last_seen integer not null
@@ -239,6 +244,17 @@ def collect_metrics():
     cpu = psutil.cpu_times_percent(interval=0.1)
     cpu_m = {k: float(getattr(cpu, k, 0.0)) for k in ["user","system","idle","iowait","nice","irq","softirq","steal"]}
     save_metric("cpu_metrics", ["ts","user","system","idle","iowait","nice","irq","softirq","steal","created_at"], [ts,cpu_m["user"],cpu_m["system"],cpu_m["idle"],cpu_m["iowait"],cpu_m["nice"],cpu_m["irq"],cpu_m["softirq"],cpu_m["steal"],now_iso()])
+    mem = psutil.virtual_memory()
+    gb = 1024 ** 3
+    mem_m = {
+        "used_gb": round(float(mem.used) / gb, 3),
+        "available_gb": round(float(mem.available) / gb, 3),
+        "free_gb": round(float(mem.free) / gb, 3),
+        "cached_gb": round(float(getattr(mem, "cached", 0)) / gb, 3),
+        "buffers_gb": round(float(getattr(mem, "buffers", 0)) / gb, 3),
+        "percent": round(float(mem.percent), 2),
+    }
+    save_metric("memory_metrics", ["ts","used_gb","available_gb","free_gb","cached_gb","buffers_gb","percent","created_at"], [ts,mem_m["used_gb"],mem_m["available_gb"],mem_m["free_gb"],mem_m["cached_gb"],mem_m["buffers_gb"],mem_m["percent"],now_iso()])
     return metrics
 
 
@@ -679,6 +695,16 @@ def api_graph_cpu(request: Request, range: str = "day"):
     rows = graph_rows("cpu_metrics", fields, range)
     labels = {f:f for f in fields}
     return {"title": f"CPU usage - {range_cfg(range)['label']}", "range": range, "rows": rows, "fields": fields, "labels": labels, "stats": series_stats(rows, fields)}
+
+@app.get("/api/graphs/memory")
+def api_graph_memory(request: Request, range: str = "day"):
+    user = require_login(request)
+    if not user: return {"error": "unauthorized"}
+    collect_metrics()
+    fields = ["used_gb", "available_gb", "cached_gb", "buffers_gb", "free_gb"]
+    rows = graph_rows("memory_metrics", fields, range)
+    labels = {"used_gb":"used", "available_gb":"available", "cached_gb":"cache", "buffers_gb":"buffers", "free_gb":"free"}
+    return {"title": f"Memory usage - {range_cfg(range)['label']}", "range": range, "rows": rows, "fields": fields, "labels": labels, "stats": series_stats(rows, fields)}
 
 @app.get("/health")
 def health():
