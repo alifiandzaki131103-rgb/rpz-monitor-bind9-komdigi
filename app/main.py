@@ -78,16 +78,27 @@ def zonestatus():
     return run(["/usr/sbin/rndc", "zonestatus", ZONE], 5)
 
 
+def parse_zonestatus(text):
+    data = {"raw": text, "ok": False}
+    for line in text.splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        data[key.strip().replace(" ", "_").lower()] = value.strip()
+    data["ok"] = "serial" in data and "nodes" in data
+    return data
+
+
 def system_metrics():
     return {"cpu": psutil.cpu_percent(interval=0.1), "mem": psutil.virtual_memory().percent, "disk": psutil.disk_usage("/").percent, "load": os.getloadavg()}
 
 
 def bind_stats():
-    data = {"ok": False, "queries": 0, "xml": ""}
+    data = {"ok": False, "queries": 0, "status": "ERROR"}
     try:
         r = httpx.get(STATS_URL, timeout=3)
         data["ok"] = r.status_code == 200
-        data["xml"] = r.text[:200]
+        data["status"] = "OK" if data["ok"] else f"HTTP {r.status_code}"
         root = ET.fromstring(r.text)
         total = 0
         for counter in root.iter():
@@ -97,6 +108,7 @@ def bind_stats():
         data["queries"] = total
     except Exception as e:
         data["error"] = str(e)
+        data["status"] = "ERROR"
     return data
 
 
@@ -171,7 +183,8 @@ def logout(request: Request):
 def dashboard(request: Request):
     user = require_login(request)
     if not user: return RedirectResponse("/login")
-    return templates.TemplateResponse("dashboard.html", {"request": request, "user": user, "active": service_active(), "rndc": rndc_status(), "zone": zonestatus(), "sys": system_metrics(), "stats": bind_stats(), "domain_count": count_rpz_domains(), "rpz_tail": tail(RPZ_LOG, 20)})
+    zone_raw = zonestatus()
+    return templates.TemplateResponse("dashboard.html", {"request": request, "user": user, "active": service_active(), "rndc": rndc_status(), "zone": zone_raw, "zone_info": parse_zonestatus(zone_raw), "sys": system_metrics(), "stats": bind_stats(), "rpz_tail": tail(RPZ_LOG, 20)})
 
 @app.get("/domain-check", response_class=HTMLResponse)
 def domain_check_page(request: Request):
