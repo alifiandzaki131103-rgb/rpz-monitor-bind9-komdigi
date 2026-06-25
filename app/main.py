@@ -113,8 +113,18 @@ def rndc_status():
     return run(["/usr/sbin/rndc", "status"], 5)
 
 
-def zonestatus():
+def zonestatus_raw():
     return run(["/usr/sbin/rndc", "zonestatus", ZONE], 5)
+
+
+def localize_bind_text(text):
+    def repl(match):
+        return localize_bind_time(match.group(0))
+    return re.sub(r"[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT", repl, text)
+
+
+def zonestatus():
+    return localize_bind_text(zonestatus_raw())
 
 
 def parse_zonestatus(text):
