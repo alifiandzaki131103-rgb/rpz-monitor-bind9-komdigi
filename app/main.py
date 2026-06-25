@@ -140,24 +140,21 @@ def normalize_domain(d):
 
 
 def check_zone_text(domain):
-    p = Path(ZONE_FILE)
-    if not p.exists(): return False, "zone file not found"
-    candidates = [domain, "*." + domain]
-    parts = domain.split(".")
-    for i in range(1, len(parts)-1): candidates.append("*." + ".".join(parts[i:]))
-    try:
-        for line in p.read_text(errors="ignore").splitlines():
-            s = line.strip().lower()
-            for c in candidates:
-                if s.startswith(c + " ") or s.startswith(c + "\t"):
-                    return True, line.strip()
-    except Exception as e:
-        return False, str(e)
-    return False, "not found in zone file"
+    # Komdigi slave zone is usually stored in BIND raw/binary format and can be >1GB.
+    # Never scan it during HTTP request. Use DNS policy result instead.
+    return False, "zone file scan disabled; using DNS RPZ policy result"
 
 
 def dig_domain(domain):
-    return run(["dig", "@127.0.0.1", domain, "+noall", "+answer", "+comments"], 8)
+    return run(["dig", "@127.0.0.1", domain, "A", "+tries=1", "+time=2", "+noall", "+answer", "+comments"], 4)
+
+
+def check_domain_fast(domain):
+    dig = dig_domain(domain)
+    upper = dig.upper()
+    blocked = "NXDOMAIN" in upper or "CNAME ." in dig or "0.0.0.0" in dig
+    reason = "DNS RPZ policy result" if blocked else "not blocked by local resolver result"
+    return blocked, reason, dig
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -200,8 +197,7 @@ def domain_check(request: Request, domain: str = Form(...)):
     if not DOMAIN_RE.match(d):
         result = {"domain": d, "error": "Domain tidak valid"}
     else:
-        in_rpz, match = check_zone_text(d)
-        dig = dig_domain(d)
+        in_rpz, match, dig = check_domain_fast(d)
         result = {"domain": d, "in_rpz": in_rpz, "match": match, "dig": dig}
         con = db(); con.execute("insert into domain_checks(domain,in_rpz,matched_record,dig_result,checked_by,checked_at) values(?,?,?,?,?,?)", (d, 1 if in_rpz else 0, match, dig, user, datetime.utcnow().isoformat())); con.commit(); con.close()
     return templates.TemplateResponse("domain_check.html", {"request": request, "result": result})
