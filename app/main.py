@@ -107,8 +107,8 @@ def save_qps_metric(ts, qps, queries):
                 "insert into qps_metrics(ts,qps,queries,created_at) values(?,?,?,?)",
                 (int(ts), float(qps), int(queries), datetime.utcnow().isoformat()),
             )
-            # Keep last 7 days at 5-second polling: about 120960 rows.
-            cutoff = int(time.time()) - (7 * 24 * 60 * 60)
+            # Keep last 30 days at 5-second polling: about 518400 rows.
+            cutoff = int(time.time()) - (30 * 24 * 60 * 60)
             con.execute("delete from qps_metrics where ts < ?", (cutoff,))
         con.commit(); con.close()
     except Exception:
@@ -120,6 +120,31 @@ def get_qps_history(limit=120):
     rows = con.execute("select ts,qps,queries from qps_metrics order by ts desc limit ?", (limit,)).fetchall()
     con.close()
     return [dict(r) for r in reversed(rows)]
+
+
+def get_qps_history_range(range_name="1h"):
+    ranges = {
+        "1h": {"seconds": 3600, "bucket": 30},
+        "1d": {"seconds": 86400, "bucket": 300},
+        "7d": {"seconds": 7 * 86400, "bucket": 1800},
+        "30d": {"seconds": 30 * 86400, "bucket": 7200},
+    }
+    cfg = ranges.get(range_name, ranges["1h"])
+    since = int(time.time()) - cfg["seconds"]
+    bucket = cfg["bucket"]
+    con = db()
+    rows = con.execute(
+        """
+        select (ts / ?) * ? as ts, avg(qps) as qps, max(queries) as queries
+        from qps_metrics
+        where ts >= ?
+        group by (ts / ?)
+        order by ts asc
+        """,
+        (bucket, bucket, since, bucket),
+    ).fetchall()
+    con.close()
+    return [{"ts": int(r["ts"]), "qps": round(float(r["qps"] or 0), 2), "queries": int(r["queries"] or 0)} for r in rows]
 
 
 def get_total_qps_samples():
@@ -262,13 +287,15 @@ def logs(request: Request):
 
 
 @app.get("/api/qps")
-def api_qps(request: Request):
+def api_qps(request: Request, range: str = "1h"):
     user = require_login(request)
     if not user:
         return {"error": "unauthorized"}
+    allowed = {"1h", "1d", "7d", "30d"}
+    range_name = range if range in allowed else "1h"
     stats = bind_stats()
-    history = get_qps_history(120)
-    return {"current": stats, "history": history, "stored_samples": get_total_qps_samples()}
+    history = get_qps_history_range(range_name)
+    return {"current": stats, "history": history, "range": range_name, "stored_samples": get_total_qps_samples()}
 
 
 @app.get("/health")
