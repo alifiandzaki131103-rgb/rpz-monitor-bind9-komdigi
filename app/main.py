@@ -275,6 +275,12 @@ def dashboard(request: Request):
     zone_raw = zonestatus()
     return templates.TemplateResponse("dashboard.html", {"request": request, "user": user, "active": service_active(), "rndc": rndc_status(), "zone": zone_raw, "zone_info": parse_zonestatus(zone_raw), "sys": system_metrics(), "stats": bind_stats(), "rpz_tail": tail(RPZ_LOG, 20)})
 
+@app.get("/graphs", response_class=HTMLResponse)
+def graphs_page(request: Request):
+    user = require_login(request)
+    if not user: return RedirectResponse("/login")
+    return templates.TemplateResponse("graphs.html", {"request": request})
+
 @app.get("/domain-check", response_class=HTMLResponse)
 def domain_check_page(request: Request):
     user = require_login(request)

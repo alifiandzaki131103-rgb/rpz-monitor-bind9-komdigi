@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Graphs</h1>
+
+<div class="card graph-card">
+  <div class="chart-head"><h2 id="dnsTitle">DNS traffic and cache hits</h2><div class="range-buttons"><button type="button" class="range-btn active" data-range="day">Day</button><button type="button" class="range-btn" data-range="week">Week</button><button type="button" class="range-btn" data-range="month">Month</button><button type="button" class="range-btn" data-range="year">Year</button></div></div>
+  <canvas id="dnsGraph" height="260"></canvas>
+  <div id="dnsLegend" class="legend-table"></div>
+</div>
+
+<div class="card graph-card">
+  <div class="chart-head"><h2 id="cpuTitle">CPU usage</h2></div>
+  <canvas id="cpuGraph" height="260"></canvas>
+  <div id="cpuLegend" class="legend-table"></div>
+</div>
+
+<script>
+let currentRange = 'day';
+const colors = ['#22c55e','#60a5fa','#f97316','#c084fc','#a3e635','#f87171','#94a3b8','#facc15'];
+function resizeCanvas(canvas, ctx) { const ratio = window.devicePixelRatio || 1; canvas.width = canvas.clientWidth * ratio; canvas.height = canvas.clientHeight * ratio; ctx.setTransform(ratio,0,0,ratio,0,0); }
+function fmtTime(ts){ const d=new Date(ts*1000); return d.toLocaleString('id-ID',{weekday:'short',hour:'2-digit',minute:'2-digit'}); }
+function drawMulti(canvasId, payload, unit){
+  const canvas=document.getElementById(canvasId), ctx=canvas.getContext('2d'); resizeCanvas(canvas,ctx);
+  const rows=payload.rows||[], fields=payload.fields||[]; const w=canvas.clientWidth,h=canvas.clientHeight; const left=58,right=24,top=22,bottom=44;
+  ctx.clearRect(0,0,w,h); ctx.fillStyle='#020617'; ctx.fillRect(0,0,w,h); ctx.strokeStyle='#334155'; ctx.fillStyle='#cbd5e1'; ctx.font='12px Arial';
+  let max=1; rows.forEach(r=>fields.forEach(f=>{max=Math.max(max, Number(r[f]||0));})); max=Math.ceil(max*1.15);
+  for(let i=0;i<=5;i++){let y=top+(h-top-bottom)*i/5; ctx.strokeStyle='#1e293b'; ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(w-right,y);ctx.stroke(); ctx.fillStyle='#cbd5e1'; ctx.fillText((max-(max*i/5)).toFixed(0),8,y+4);}
+  ctx.save(); ctx.translate(14,h/2); ctx.rotate(-Math.PI/2); ctx.fillStyle='#94a3b8'; ctx.fillText(unit,0,0); ctx.restore();
+  if(rows.length>1){ for(let ti=0;ti<4;ti++){let idx=Math.floor((rows.length-1)*ti/3); let x=left+(w-left-right)*idx/(rows.length-1); ctx.fillStyle='#94a3b8'; ctx.fillText(fmtTime(rows[idx].ts), Math.min(x,w-125), h-18);} }
+  fields.forEach((f,fi)=>{ctx.strokeStyle=colors[fi%colors.length]; ctx.lineWidth=2; ctx.beginPath(); rows.forEach((r,i)=>{let x=left+(w-left-right)*(rows.length<=1?0:i/(rows.length-1)); let y=top+(h-top-bottom)*(1-(Number(r[f]||0)/max)); if(i===0)ctx.moveTo(x,y); else ctx.lineTo(x,y);}); ctx.stroke();});
+}
+function legend(elId,payload){ const fields=payload.fields||[], labels=payload.labels||{}, stats=payload.stats||{}; let html='<table><thead><tr><th></th><th>Cur:</th><th>Min:</th><th>Avg:</th><th>Max:</th></tr></thead><tbody>'; fields.forEach((f,i)=>{let s=stats[f]||{}; html+=`<tr><td><span class="sw" style="background:${colors[i%colors.length]}"></span>${labels[f]||f}</td><td>${s.cur??0}</td><td>${s.min??0}</td><td>${s.avg??0}</td><td>${s.max??0}</td></tr>`}); html+='</tbody></table>'; document.getElementById(elId).innerHTML=html; }
+async function fetchJson(url){ const r=await fetch(url,{cache:'no-store'}); return await r.json(); }
+async function refreshGraphs(){
+  const dns=await fetchJson('/api/graphs/dns?range='+currentRange); const cpu=await fetchJson('/api/graphs/cpu?range='+currentRange);
+  document.getElementById('dnsTitle').textContent=dns.title; document.getElementById('cpuTitle').textContent=cpu.title;
+  drawMulti('dnsGraph',dns,'queries / second'); legend('dnsLegend',dns); drawMulti('cpuGraph',cpu,'%'); legend('cpuLegend',cpu);
+}
+document.querySelectorAll('.range-btn').forEach(btn=>btn.addEventListener('click',()=>{currentRange=btn.dataset.range; document.querySelectorAll('.range-btn').forEach(b=>b.classList.remove('active')); btn.classList.add('active'); refreshGraphs();}));
+window.addEventListener('resize',refreshGraphs); refreshGraphs(); setInterval(refreshGraphs,10000);
+</script>
+{% endblock %}
