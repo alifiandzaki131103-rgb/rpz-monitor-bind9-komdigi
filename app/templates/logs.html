@@ -3,8 +3,8 @@
 <div class="chart-head">
   <h1>Logs</h1>
   <div class="range-buttons">
-    <span id="logStatus" class="muted">Auto refresh: 5s</span>
-    <button type="button" id="toggleRefresh" class="range-btn active">Pause</button>
+    <span id="logStatus" class="muted">Live connecting...</span>
+    <button type="button" id="toggleLive" class="range-btn active">Pause Live</button>
   </div>
 </div>
 
@@ -22,35 +22,47 @@
 </div>
 
 <script>
-let autoRefresh = true;
-let timer = null;
-function renderLines(id, lines) {
+let live = true;
+let source = null;
+const maxLines = 500;
+function appendLines(id, lines) {
+  if (!lines || !lines.length) return;
   const el = document.getElementById(id);
   const nearBottom = (el.scrollTop + el.clientHeight) >= (el.scrollHeight - 40);
-  el.textContent = (lines || []).join('\n');
+  const current = el.textContent ? el.textContent.split('\n').filter(Boolean) : [];
+  const merged = current.concat(lines).slice(-maxLines);
+  el.textContent = merged.join('\n');
   if (nearBottom) el.scrollTop = el.scrollHeight;
 }
-async function refreshLogs() {
-  if (!autoRefresh) return;
-  try {
-    const r = await fetch('/api/logs?lines=120', {cache: 'no-store'});
-    const data = await r.json();
-    if (data.error) return;
-    renderLines('queryLog', data.query);
-    renderLines('rpzLog', data.rpz);
-    const d = new Date((data.ts || Date.now()/1000) * 1000);
-    document.getElementById('logStatus').textContent = 'Last update: ' + d.toLocaleTimeString('id-ID') + ' | Auto refresh: 5s';
-  } catch (e) {
-    document.getElementById('logStatus').textContent = 'Refresh error';
-  }
+async function loadInitial() {
+  const r = await fetch('/api/logs?lines=120', {cache: 'no-store'});
+  const data = await r.json();
+  if (data.error) return;
+  document.getElementById('queryLog').textContent = (data.query || []).join('\n');
+  document.getElementById('rpzLog').textContent = (data.rpz || []).join('\n');
+  document.getElementById('queryLog').scrollTop = document.getElementById('queryLog').scrollHeight;
+  document.getElementById('rpzLog').scrollTop = document.getElementById('rpzLog').scrollHeight;
 }
-document.getElementById('toggleRefresh').addEventListener('click', () => {
-  autoRefresh = !autoRefresh;
-  document.getElementById('toggleRefresh').textContent = autoRefresh ? 'Pause' : 'Resume';
-  document.getElementById('toggleRefresh').classList.toggle('active', autoRefresh);
-  if (autoRefresh) refreshLogs();
+function connectLive() {
+  if (source) source.close();
+  source = new EventSource('/api/logs/live');
+  source.onopen = () => { document.getElementById('logStatus').textContent = 'Live connected'; };
+  source.onmessage = (event) => {
+    if (!live) return;
+    const data = JSON.parse(event.data);
+    appendLines('queryLog', data.query);
+    appendLines('rpzLog', data.rpz);
+    const d = new Date((data.ts || Date.now()/1000) * 1000);
+    document.getElementById('logStatus').textContent = 'Live update: ' + d.toLocaleTimeString('id-ID');
+  };
+  source.onerror = () => { document.getElementById('logStatus').textContent = 'Live reconnecting...'; };
+}
+document.getElementById('toggleLive').addEventListener('click', () => {
+  live = !live;
+  document.getElementById('toggleLive').textContent = live ? 'Pause Live' : 'Resume Live';
+  document.getElementById('toggleLive').classList.toggle('active', live);
+  document.getElementById('logStatus').textContent = live ? 'Live connected' : 'Live paused';
 });
-refreshLogs();
-timer = setInterval(refreshLogs, 5000);
+loadInitial().then(connectLive);
 </script>
 {% endblock %}

@@ -1,10 +1,10 @@
-import os, re, subprocess, sqlite3, time, xml.etree.ElementTree as ET
+import asyncio, json, os, re, subprocess, sqlite3, time, xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
 import httpx, psutil
 from fastapi import FastAPI, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from passlib.context import CryptContext
@@ -233,6 +233,31 @@ def tail(path, n=80):
         return [str(e)]
 
 
+def file_size(path):
+    try:
+        return Path(path).stat().st_size
+    except Exception:
+        return 0
+
+
+def read_new_lines(path, offset, max_bytes=65536):
+    try:
+        p = Path(path)
+        if not p.exists():
+            return offset, []
+        size = p.stat().st_size
+        if size < offset:
+            offset = 0
+        with p.open("rb") as f:
+            f.seek(offset)
+            data = f.read(max_bytes)
+            offset = f.tell()
+        lines = data.decode(errors="ignore").splitlines()
+        return offset, lines[-200:]
+    except Exception as e:
+        return offset, [str(e)]
+
+
 def normalize_domain(d):
     return d.strip().lower().rstrip(".")
 
@@ -312,6 +337,31 @@ def api_logs(request: Request, lines: int = 120):
     if not user: return {"error": "unauthorized"}
     safe_lines = max(10, min(lines, 500))
     return {"query": tail(QUERY_LOG, safe_lines), "rpz": tail(RPZ_LOG, safe_lines), "ts": int(time.time())}
+
+@app.get("/api/logs/live")
+async def api_logs_live(request: Request):
+    user = require_login(request)
+    if not user:
+        return StreamingResponse(iter(["event: error\ndata: unauthorized\n\n"]), media_type="text/event-stream")
+
+    async def event_stream():
+        q_off = file_size(QUERY_LOG)
+        r_off = file_size(RPZ_LOG)
+        yield "event: hello\ndata: live\n\n"
+        while True:
+            if await request.is_disconnected():
+                break
+            q_off_new, q_lines = read_new_lines(QUERY_LOG, q_off)
+            r_off_new, r_lines = read_new_lines(RPZ_LOG, r_off)
+            q_off, r_off = q_off_new, r_off_new
+            if q_lines or r_lines:
+                payload = {"query": q_lines, "rpz": r_lines, "ts": int(time.time())}
+                yield "data: " + json.dumps(payload) + "\n\n"
+            else:
+                yield ": keepalive\n\n"
+            await asyncio.sleep(1)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 @app.get("/api/qps")
 def api_qps(request: Request, range: str = "1h"):
