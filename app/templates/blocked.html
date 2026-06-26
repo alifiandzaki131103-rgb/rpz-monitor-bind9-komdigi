@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="chart-head">
+  <div>
+    <h1>Top Domain Blocked</h1>
+    <p class="muted">Source: <span class="mono">{{ data.log_file }}</span> | Status: {{ data.status }} | Parsed lines: {{ data.parsed_lines }} | Scanned bytes: {{ data.scanned_bytes or 0 }}</p>
+  </div>
+  <div class="range-buttons">
+    <a class="range-btn" href="/blocked?limit=50">Top 50</a>
+    <a class="range-btn" href="/blocked?limit=100">Top 100</a>
+    <a class="range-btn" href="/blocked?limit=200">Top 200</a>
+  </div>
+</div>
+
+<div class="card">
+  {% if data.error %}<p class="bad">{{ data.error }}</p>{% endif %}
+  <table class="data-table">
+    <thead>
+      <tr><th>#</th><th>Domain</th><th>Hits</th><th>Top Client</th><th>Client Hits</th><th>Last Seen</th></tr>
+    </thead>
+    <tbody>
+    {% for r in data.rows %}
+      <tr>
+        <td>{{ loop.index }}</td>
+        <td class="mono">{{ r.domain }}</td>
+        <td>{{ r.hits }}</td>
+        <td class="mono">{{ r.top_client }}</td>
+        <td>{{ r.top_client_hits }}</td>
+        <td>{{ r.last_seen_local }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="6" class="muted">No blocked domain data</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -10,6 +10,22 @@
   <div class="card"><h3>RPZ Zone</h3><p>Zone: {{ zone_info.name or 'trustpositifkominfo' }}</p><p>Serial: {{ zone_info.serial or '-' }}</p><p>Nodes: {{ zone_info.nodes or '-' }}</p><p>Last loaded: {{ zone_info.last_loaded_local or zone_info.last_loaded or '-' }}</p><p>Next refresh: {{ zone_info.next_refresh_local or zone_info.next_refresh or '-' }}</p></div>
 </div>
 
+
+<h2>Top Domain Blocked</h2>
+<div class="card">
+  <table class="data-table">
+    <thead><tr><th>#</th><th>Domain</th><th>Hits</th><th>Top Client</th><th>Last Seen</th></tr></thead>
+    <tbody>
+    {% for r in top_blocked.rows %}
+      <tr><td>{{ loop.index }}</td><td class="mono">{{ r.domain }}</td><td>{{ r.hits }}</td><td class="mono">{{ r.top_client }}</td><td>{{ r.last_seen_local }}</td></tr>
+    {% else %}
+      <tr><td colspan="5" class="muted">No blocked domain data</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <p><a href="/blocked">View all blocked domains</a></p>
+</div>
+
 <h2>RNDC Status</h2><pre>{{ rndc }}</pre>
 <h2>Zone Status</h2><pre>{{ zone }}</pre>
 <h2>Recent RPZ Log</h2><pre>{% for l in rpz_tail %}{{ l }}

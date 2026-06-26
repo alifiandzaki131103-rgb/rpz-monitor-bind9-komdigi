@@ -303,6 +303,71 @@ def get_total_qps_samples():
     con = db(); row = con.execute("select count(*) as c from qps_metrics").fetchone(); con.close(); return row["c"] if row else 0
 
 
+RPZ_BLOCK_RE = re.compile(r"client\s+@\S+\s+(?P<client>[0-9a-fA-F:.]+)#\d+\s+\((?P<qname>[^)]+)\):\s+rpz\s+.*?\s+rewrite\s+(?P<rewrite>\S+)", re.I)
+RPZ_TIME_RE = re.compile(r"^(?P<ts>\d{2}-[A-Za-z]{3}-\d{4}\s+\d{2}:\d{2}:\d{2})")
+
+
+def rpzlog_ts(line):
+    m = RPZ_TIME_RE.match(line)
+    if not m:
+        return int(time.time())
+    try:
+        return int(datetime.strptime(m.group("ts"), "%d-%b-%Y %H:%M:%S").replace(tzinfo=TZ).timestamp())
+    except Exception:
+        return int(time.time())
+
+
+def rpz_block_domain(value):
+    d = normalize_domain(value.split("/", 1)[0])
+    return d if DOMAIN_RE.match(d) else ""
+
+
+def parse_rpz_blocked_line(line):
+    m = RPZ_BLOCK_RE.search(line)
+    if not m:
+        return None
+    domain = rpz_block_domain(m.group("qname")) or rpz_block_domain(m.group("rewrite"))
+    if not domain:
+        return None
+    return {"ts": rpzlog_ts(line), "domain": domain, "client": m.group("client")}
+
+
+def top_blocked_domains(limit=50, max_bytes=20 * 1024 * 1024):
+    p = Path(RPZ_LOG)
+    if not p.exists():
+        return {"status": "missing rpz log", "log_file": RPZ_LOG, "rows": [], "total_hits": 0, "parsed_lines": 0}
+    try:
+        size = p.stat().st_size
+        with p.open("rb") as f:
+            if size > max_bytes:
+                f.seek(size - max_bytes)
+                f.readline()
+            data = f.read(max_bytes)
+        lines = data.decode(errors="ignore").splitlines()
+        agg = {}
+        parsed = 0
+        for line in lines:
+            item = parse_rpz_blocked_line(line)
+            if not item:
+                continue
+            parsed += 1
+            row = agg.setdefault(item["domain"], {"domain": item["domain"], "hits": 0, "last_seen": 0, "clients": {}})
+            row["hits"] += 1
+            row["last_seen"] = max(row["last_seen"], item["ts"])
+            row["clients"][item["client"]] = row["clients"].get(item["client"], 0) + 1
+        rows = sorted(agg.values(), key=lambda r: (-r["hits"], r["domain"]))[:limit]
+        for r in rows:
+            top_client, top_client_hits = "-", 0
+            if r["clients"]:
+                top_client, top_client_hits = sorted(r["clients"].items(), key=lambda x: (-x[1], x[0]))[0]
+            r["top_client"] = top_client
+            r["top_client_hits"] = top_client_hits
+            r["last_seen_local"] = format_local(r["last_seen"]) if r["last_seen"] else "-"
+            del r["clients"]
+        return {"status": "ok", "log_file": RPZ_LOG, "rows": rows, "total_hits": sum(r["hits"] for r in rows), "parsed_lines": parsed, "scanned_bytes": min(size, max_bytes)}
+    except Exception as e:
+        return {"status": "error", "error": str(e), "log_file": RPZ_LOG, "rows": [], "total_hits": 0, "parsed_lines": 0}
+
 def tail(path, n=80):
     try:
         p = Path(path)
@@ -589,7 +654,7 @@ def dashboard(request: Request):
     user = require_login(request)
     if not user: return RedirectResponse("/login")
     zone_raw = zonestatus()
-    return templates.TemplateResponse("dashboard.html", {"request": request, "user": user, "active": service_active(), "rndc": rndc_status(), "zone": zone_raw, "zone_info": parse_zonestatus(zone_raw), "sys": system_metrics(), "stats": bind_stats(), "app_tz": APP_TZ, "now_local": now_local().strftime("%Y-%m-%d %H:%M:%S %Z"), "rpz_tail": tail(RPZ_LOG, 20)})
+    return templates.TemplateResponse("dashboard.html", {"request": request, "user": user, "active": service_active(), "rndc": rndc_status(), "zone": zone_raw, "zone_info": parse_zonestatus(zone_raw), "sys": system_metrics(), "stats": bind_stats(), "app_tz": APP_TZ, "now_local": now_local().strftime("%Y-%m-%d %H:%M:%S %Z"), "rpz_tail": tail(RPZ_LOG, 20), "top_blocked": top_blocked_domains(10)})
 
 @app.get("/graphs", response_class=HTMLResponse)
 def graphs_page(request: Request):
@@ -630,6 +695,20 @@ def domain_check(request: Request, domain: str = Form(...)):
         result = {"domain": d, "in_rpz": in_rpz, "match": match, "dig": dig}
         con = db(); con.execute("insert into domain_checks(domain,in_rpz,matched_record,dig_result,checked_by,checked_at) values(?,?,?,?,?,?)", (d, 1 if in_rpz else 0, match, dig, user, now_iso())); con.commit(); con.close()
     return templates.TemplateResponse("domain_check.html", {"request": request, "result": result})
+
+@app.get("/blocked", response_class=HTMLResponse)
+def blocked_page(request: Request, limit: int = 50):
+    user = require_login(request)
+    if not user: return RedirectResponse("/login")
+    safe_limit = max(10, min(limit, 200))
+    return templates.TemplateResponse("blocked.html", {"request": request, "data": top_blocked_domains(safe_limit), "limit": safe_limit})
+
+@app.get("/api/blocked")
+def api_blocked(request: Request, limit: int = 50):
+    user = require_login(request)
+    if not user: return {"error": "unauthorized"}
+    safe_limit = max(10, min(limit, 200))
+    return top_blocked_domains(safe_limit)
 
 @app.get("/logs", response_class=HTMLResponse)
 def logs(request: Request):
