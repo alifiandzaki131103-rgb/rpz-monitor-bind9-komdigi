@@ -1,0 +1,50 @@
+acl "trusted_clients" {
+    127.0.0.1;
+    localhost;
+    10.0.0.0/8;
+    172.16.0.0/12;
+    192.168.0.0/16;
+    103.55.253.253;
+    103.55.253.0/24;
+    103.55.252.0/23;
+};
+
+options {
+    directory "/var/cache/bind";
+    recursion yes;
+    allow-recursion { trusted_clients; };
+    allow-query { trusted_clients; };
+    forwarders { 1.1.1.1; 8.8.8.8; };
+    dnssec-validation auto;
+    listen-on { any; };
+    listen-on-v6 { none; };
+    response-policy { zone "trustpositifkominfo"; };
+
+    // Memory guard for 16GB RAM target. RPZ itself still needs large memory.
+    max-cache-size 512M;
+    recursive-clients 600;
+    tcp-clients 100;
+};
+
+statistics-channels {
+    inet 127.0.0.1 port 8053 allow { 127.0.0.1; };
+};
+
+logging {
+    channel query_log {
+        file "/var/cache/bind/query.log" versions 2 size 20m;
+        severity info;
+        print-time yes;
+        print-category yes;
+        print-severity yes;
+    };
+    channel rpz_log {
+        file "/var/cache/bind/rpz.log" versions 5 size 100m;
+        severity info;
+        print-time yes;
+        print-category yes;
+        print-severity yes;
+    };
+    category queries { query_log; };
+    category rpz { rpz_log; };
+};
